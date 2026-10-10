@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=RemoteLinux
+GenericName=Remote Desktop
+Comment=Control your desktop from your laptop, or share this PC
+Exec=rl-gui
+Icon=preferences-desktop-remote-desktop
+Terminal=false
+Categories=Network;RemoteAccess;
+StartupWMClass=remotelinux
+Keywords=remote;desktop;vnc;share;
+Actions=share;
+
+[Desktop Action share]
+Name=Share this PC
+Exec=rl-gui --share

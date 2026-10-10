@@ -3,6 +3,8 @@
 pub mod client;
 pub mod clock;
 pub mod config;
+pub mod discovery;
+pub mod hostctl;
 pub mod identity;
 pub mod pairing;
 pub mod paths;

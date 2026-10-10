@@ -16,35 +16,29 @@ display's refresh.
 
 ## Install
 
-Build dependencies: `rust`, `clang`, `ffmpeg`, `sdl3` (all in the Arch repos).
+Runtime dependencies: `sudo pacman -S ffmpeg sdl3`. Install the same thing on both machines:
 
 ```sh
-# Desktop
-scripts/install.sh host      # installs ~/.local/bin/rl-host and enables the user service
-
-# Laptop (copy or clone this folder there first)
-scripts/install.sh client    # installs ~/.local/bin/rl-client
+./install.sh          # from the release tarball (uses the prebuilt binaries)
+scripts/install.sh    # from a source checkout (builds first; needs rust and clang)
 ```
 
-Or build a package: `cd packaging && makepkg -si`, then on the desktop
-`systemctl --user enable --now rl-host`.
+This installs `rl-host`, `rl-client` and `rl-gui` to `~/.local/bin` and adds
+**RemoteLinux** to your app launcher. You can also build a package:
+`cd packaging && makepkg -si`.
 
-Desktop prerequisites:
-- **uinput access.** Check with `test -w /dev/uinput && echo ok`. If that
-  fails, install `packaging/70-remotelinux.rules` into `/etc/udev/rules.d/`.
-- **Firewall.** With ufw: `sudo ufw allow from 192.168.0.0/16 to any port 47800 proto udp`.
+## Set up and pair (in the app, once)
 
-## Pair (once)
+1. **Desktop:** open RemoteLinux → **Share this PC** → **Turn on**. If it shows
+   *Finish setup*, click **Allow** (firewall / input access, asks for your
+   password once). Then click **Show pairing code**.
+2. **Laptop:** open RemoteLinux → **Pair a computer**. The desktop appears in
+   the list automatically (mDNS). Pick it, type the code and press **Pair**.
+3. **Laptop:** click **Connect**.
 
-```sh
-# Desktop
-rl-host pair                 # shows a 6-digit PIN for 2 minutes
+Sharing starts automatically at every login once it's turned on.
 
-# Laptop
-rl-client pair 192.168.0.196 # enter the PIN
-```
-
-## Connect
+## Connect from the terminal (optional)
 
 ```sh
 rl-client connect            # the only, or most recently used, desktop

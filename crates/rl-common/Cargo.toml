@@ -20,3 +20,4 @@ spake2.workspace = true
 hmac.workspace = true
 rand.workspace = true
 bytes.workspace = true
+mdns-sd = "0.21.5"

@@ -1,8 +1,10 @@
-//! RemoteLinux GUI for the laptop: pick a paired desktop and connect, pair a
-//! new one, and change stream settings. The viewer itself is the
-//! `rl-client connect --json` process (see `session.rs`).
+//! RemoteLinux GUI. On the laptop: find and pair desktops, connect, change
+//! stream settings. On the desktop: turn on sharing and show the pairing code
+//! (`share.rs`). The viewer itself is the `rl-client connect --json` process
+//! (see `session.rs`).
 
 mod session;
+mod share;
 mod theme;
 
 use std::collections::HashMap;
@@ -11,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align, Layout, RichText};
 use rl_common::client::ProbeResult;
+use rl_common::discovery::Discovered;
 use rl_common::config::ClientConfig;
 use rl_common::trust::{KnownHost, KnownHosts};
 use serde_json::{json, Value};
@@ -19,10 +22,12 @@ use session::{Session, State};
 use theme::*;
 
 const PROBE_EVERY: Duration = Duration::from_secs(10);
+const DISCOVER_EVERY: Duration = Duration::from_secs(3);
 
 pub enum Msg {
     Probed(Vec<ProbeResult>),
     Paired(Result<KnownHost, String>),
+    Discovered(Vec<Discovered>),
     Viewer(Value),
     ViewerExited,
 }
@@ -32,6 +37,7 @@ enum Screen {
     Home,
     Pair,
     Settings,
+    Share,
 }
 
 /// Things a click asks for, applied after drawing (avoids borrowing `self` twice).
@@ -66,6 +72,10 @@ struct App {
     /// Message at the top of the home screen: (text, is_error).
     banner: Option<(String, bool)>,
     confirm_forget: Option<String>,
+    share: share::Share,
+    discovered: Vec<Discovered>,
+    discovering: bool,
+    last_discover: Option<Instant>,
 }
 
 impl App {
@@ -77,8 +87,14 @@ impl App {
             banner = Some((format!("Could not read client.toml: {e:#}"), true));
             ClientConfig::default()
         });
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let share = share::Share::new(rt.handle().clone(), cc.egui_ctx.clone());
         let mut app = Self {
-            rt: tokio::runtime::Runtime::new().expect("tokio runtime"),
+            share,
+            discovered: Vec::new(),
+            discovering: false,
+            last_discover: None,
+            rt,
             tx,
             rx,
             ctx: cc.egui_ctx.clone(),
@@ -98,8 +114,9 @@ impl App {
             confirm_forget: None,
         };
         app.reload_hosts();
-        if app.hosts.is_empty() {
-            app.screen = Screen::Pair;
+        // A desktop that shares itself and controls nothing opens on "Share this PC".
+        if (app.hosts.is_empty() && app.share.is_enabled()) || std::env::args().any(|a| a == "--share") {
+            app.screen = Screen::Share;
         }
         app
     }
@@ -125,6 +142,20 @@ impl App {
         self.rt.spawn(async move {
             let r = rl_common::client::probe(&hosts, Duration::from_secs(2)).await;
             let _ = tx.send(Msg::Probed(r));
+            ctx.request_repaint();
+        });
+    }
+
+    fn discover(&mut self) {
+        if self.discovering {
+            return;
+        }
+        self.discovering = true;
+        self.last_discover = Some(Instant::now());
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let found = rl_common::discovery::discover(Duration::from_millis(900)).await.unwrap_or_default();
+            let _ = tx.send(Msg::Discovered(found));
             ctx.request_repaint();
         });
     }
@@ -174,6 +205,12 @@ impl App {
                     self.screen = Screen::Home;
                     self.reload_hosts();
                     self.last_probe = None;
+                }
+                Msg::Discovered(d) => {
+                    self.discovering = false;
+                    // Don't list this machine's own host.
+                    let own = rl_common::hostctl::host_binary().and(rl_common::discovery::local_ip());
+                    self.discovered = d.into_iter().filter(|h| own.is_none_or(|ip| !h.address.starts_with(&format!("{ip}:")))).collect();
                 }
                 Msg::Paired(Err(e)) => {
                     self.pairing = false;
@@ -258,15 +295,33 @@ impl App {
 
         if self.hosts.is_empty() {
             card(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(RichText::new("No computers yet").size(20.0).strong());
-                    ui.label(muted("Pair your desktop once, then connect with one click."));
-                    ui.add_space(8.0);
-                    if primary(ui, "Pair a computer", true).clicked() {
-                        action = Some(Action::Go(Screen::Pair));
-                    }
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("💻  This is my laptop").size(18.0).strong().color(TEXT));
+                        ui.label(muted("Pair your desktop once, then connect with one click."));
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if primary(ui, "Pair a computer", true).clicked() {
+                            action = Some(Action::Go(Screen::Pair));
+                        }
+                    });
                 });
             });
+            ui.add_space(12.0);
+            card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("🖥  This is my desktop").size(18.0).strong().color(TEXT));
+                        ui.label(muted("Turn on sharing so your laptop can control this PC."));
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if secondary(ui, "Share this PC").clicked() {
+                            action = Some(Action::Go(Screen::Share));
+                        }
+                    });
+                });
+            });
+            ui.add_space(12.0);
         }
 
         for (i, host) in self.hosts.iter().enumerate() {
@@ -387,13 +442,59 @@ impl App {
         }
         heading(ui, "Pair a new computer", "You only need to do this once. After pairing, connecting takes one click.");
         card(ui, |ui| {
-            step(ui, "1", "On the desktop, run  rl-host pair  in a terminal.", "It shows a 6-digit code that works for 2 minutes.");
+            step(ui, "1", "On the desktop, open RemoteLinux → Share this PC → Show pairing code.", "The code works for 2 minutes.");
             ui.add_space(12.0);
-            step(ui, "2", "Type the desktop's name or IP address.", "");
-            ui.add_enabled(
-                !self.pairing,
-                egui::TextEdit::singleline(&mut self.pair_addr).hint_text("desktop.local or 192.168.1.20").desired_width(f32::INFINITY).margin(egui::vec2(12.0, 10.0)),
-            );
+            step(ui, "2", "Choose the desktop.", "");
+            if self.discovered.is_empty() {
+                ui.horizontal(|ui| {
+                    if self.discovering {
+                        ui.spinner();
+                    }
+                    ui.label(muted("Looking for computers on your network…").size(13.0));
+                });
+            }
+            let mut pick = None;
+            for d in &self.discovered {
+                let selected = self.pair_addr == d.address;
+                let paired = self.hosts.iter().any(|h| h.fingerprint == d.fingerprint);
+                let frame = egui::Frame::new()
+                    .fill(if selected { SURFACE2 } else { SURFACE })
+                    .stroke(egui::Stroke::new(1.0, if selected { ACCENT } else { BORDER }))
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::symmetric(14, 10));
+                let r = frame
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("🖥").color(if selected { ACCENT } else { MUTED }));
+                            ui.label(RichText::new(&d.name).strong().color(TEXT));
+                            ui.label(muted(d.address.split(':').next().unwrap_or("")).size(13.0));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if d.pairing {
+                                    pill(ui, "Showing a code", SUCCESS, SUCCESS_SOFT);
+                                } else if paired {
+                                    pill(ui, "Already paired", MUTED, SURFACE2);
+                                }
+                            });
+                        });
+                    })
+                    .response
+                    .interact(egui::Sense::click());
+                if r.clicked() {
+                    pick = Some(d.address.clone());
+                }
+                ui.add_space(4.0);
+            }
+            if let Some(a) = pick {
+                self.pair_addr = a;
+            }
+            ui.collapsing(RichText::new("Not listed? Enter its address").size(13.0).color(MUTED), |ui| {
+                ui.add_enabled(
+                    !self.pairing,
+                    egui::TextEdit::singleline(&mut self.pair_addr).hint_text("192.168.1.20 or desktop.local").desired_width(f32::INFINITY).margin(egui::vec2(12.0, 10.0)),
+                );
+                ui.label(muted("The desktop shows its address on its Share this PC screen.").size(12.0));
+            });
             ui.add_space(12.0);
             step(ui, "3", "Enter the code shown on the desktop.", "");
             let pin = ui.add_enabled(
@@ -602,11 +703,25 @@ impl eframe::App for App {
             self.probe();
         }
         ctx.request_repaint_after(PROBE_EVERY);
+        if self.screen == Screen::Pair && self.last_discover.is_none_or(|t| t.elapsed() >= DISCOVER_EVERY) {
+            self.discover();
+        }
+        if self.screen == Screen::Pair {
+            ctx.request_repaint_after(DISCOVER_EVERY);
+        }
 
         egui::Panel::top("bar").frame(egui::Frame::new().fill(SURFACE).inner_margin(egui::Margin::symmetric(16, 10))).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("🖥").color(ACCENT).size(18.0));
                 ui.label(RichText::new("RemoteLinux").strong().color(TEXT));
+                ui.add_space(16.0);
+                let on_share = self.screen == Screen::Share;
+                if ui.selectable_label(!on_share && self.screen != Screen::Settings, "Connect").clicked() {
+                    self.apply(Action::Go(Screen::Home));
+                }
+                if ui.selectable_label(on_share, "Share this PC").clicked() {
+                    self.apply(Action::Go(Screen::Share));
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if self.screen != Screen::Settings && ui.add(egui::Button::new(RichText::new("⚙").size(18.0).color(MUTED)).frame(false)).on_hover_text("Settings").clicked() {
                         self.apply(Action::Go(Screen::Settings));
@@ -638,6 +753,10 @@ impl eframe::App for App {
                         Screen::Home => self.home(ui),
                         Screen::Pair => self.pair(ui),
                         Screen::Settings => self.settings(ui),
+                        Screen::Share => {
+                            self.share.ui(ui);
+                            None
+                        }
                     };
                     ui.add_space(24.0);
                 });

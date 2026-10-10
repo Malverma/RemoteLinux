@@ -7,6 +7,7 @@ arch=('x86_64')
 license=('Apache-2.0')
 depends=('ffmpeg' 'sdl3' 'hyprland')
 optdepends=('nvidia-utils: NVENC hardware encoding on the host'
+            'polkit: one-click firewall / input setup from the app'
             'libnotify: connect/disconnect notifications on the host')
 makedepends=('cargo' 'clang')
 provides=('remotelinux')
@@ -26,6 +27,8 @@ package() {
   cd "$startdir/.."
   install -Dm755 target/release/rl-host "$pkgdir/usr/bin/rl-host"
   install -Dm755 target/release/rl-client "$pkgdir/usr/bin/rl-client"
+  install -Dm755 target/release/rl-gui "$pkgdir/usr/bin/rl-gui"
+  install -Dm644 packaging/remotelinux.desktop "$pkgdir/usr/share/applications/remotelinux.desktop"
   install -Dm644 packaging/rl-host.service "$pkgdir/usr/lib/systemd/user/rl-host.service"
   install -Dm644 packaging/70-remotelinux.rules "$pkgdir/usr/lib/udev/rules.d/70-remotelinux.rules"
   install -Dm644 README.md "$pkgdir/usr/share/doc/remotelinux/README.md"

@@ -170,6 +170,22 @@ async fn run(listen: Option<String>) -> Result<()> {
         tracing::error!("input injection disabled: {e:#}");
     }
     tokio::spawn(control::serve(host.clone()));
+    {
+        // LAN discovery (mDNS), refreshed when a pairing window opens or closes.
+        let h = host.clone();
+        tokio::spawn(async move {
+            let mut adv = match rl_common::discovery::Advertiser::new(&h.name, h.listen.port(), &h.identity.fingerprint) {
+                Ok(a) => a,
+                Err(e) => return tracing::warn!("LAN discovery disabled: {e:#}"),
+            };
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Err(e) = adv.set_pairing(h.pairing_open()) {
+                    tracing::warn!("mDNS update: {e:#}");
+                }
+            }
+        });
+    }
     let h = host.clone();
     tokio::spawn(async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
