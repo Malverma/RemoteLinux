@@ -1,0 +1,18 @@
+[package]
+name = "rl-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rl-common = { path = "../rl-common" }
+anyhow.workspace = true
+tokio.workspace = true
+quinn.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+bytes.workspace = true
+ffmpeg-next.workspace = true
+sdl3-sys = "0.7"

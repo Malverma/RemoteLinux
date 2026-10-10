@@ -1,0 +1,15 @@
+[Unit]
+Description=RemoteLinux host (low-latency remote desktop server)
+Documentation=file:///usr/share/doc/remotelinux/README.md
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/rl-host run
+Restart=on-failure
+RestartSec=2
+# Wayland/Hyprland variables come from the session (uwsm or
+# `systemctl --user import-environment`); rl-host also finds them itself.
+
+[Install]
+WantedBy=graphical-session.target

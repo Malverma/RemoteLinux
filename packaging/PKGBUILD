@@ -1,0 +1,33 @@
+# Build from the local checkout:  cd packaging && makepkg -si
+pkgname=remotelinux-git
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Low-latency LAN remote desktop for Hyprland (rl-host + rl-client)"
+arch=('x86_64')
+license=('MIT')
+depends=('ffmpeg' 'sdl3' 'hyprland')
+optdepends=('nvidia-utils: NVENC hardware encoding on the host'
+            'libnotify: connect/disconnect notifications on the host')
+makedepends=('cargo' 'clang')
+provides=('remotelinux')
+conflicts=('remotelinux')
+
+build() {
+  cd "$startdir/.."
+  cargo build --release --locked
+}
+
+check() {
+  cd "$startdir/.."
+  cargo test --release --locked -p rl-common
+}
+
+package() {
+  cd "$startdir/.."
+  install -Dm755 target/release/rl-host "$pkgdir/usr/bin/rl-host"
+  install -Dm755 target/release/rl-client "$pkgdir/usr/bin/rl-client"
+  install -Dm644 packaging/rl-host.service "$pkgdir/usr/lib/systemd/user/rl-host.service"
+  install -Dm644 packaging/70-remotelinux.rules "$pkgdir/usr/lib/udev/rules.d/70-remotelinux.rules"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/remotelinux/README.md"
+  install -Dm644 spec.md "$pkgdir/usr/share/doc/remotelinux/spec.md"
+}

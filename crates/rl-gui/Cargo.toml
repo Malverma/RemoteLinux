@@ -1,0 +1,11 @@
+[package]
+name = "rl-gui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rl-common = { path = "../rl-common" }
+anyhow.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+eframe = "0.36"

@@ -1,0 +1,127 @@
+# RemoteLinux
+
+Low-latency remote desktop from an Arch laptop to an Arch + Hyprland desktop
+on the same LAN. Built for responsiveness, not image quality. See
+[spec.md](spec.md) for the design.
+
+- `rl-host`: runs on the desktop. Captures the screen (wlr-screencopy),
+  encodes H.264 with NVENC, streams over QUIC and injects input via uinput.
+- `rl-client`: runs on the laptop. Decodes and displays the stream in an
+  SDL3 window and forwards keyboard and mouse.
+
+Measured on the desktop over loopback (1080p60, RTX 2080 SUPER):
+**~6 ms from capture to decoded frame** (4.5 ms capture+encode, 1 ms decode).
+Over a LAN, add the network time (usually 1–5 ms on Wi-Fi) and the laptop
+display's refresh.
+
+## Install
+
+Build dependencies: `rust`, `clang`, `ffmpeg`, `sdl3` (all in the Arch repos).
+
+```sh
+# Desktop
+scripts/install.sh host      # installs ~/.local/bin/rl-host and enables the user service
+
+# Laptop (copy or clone this folder there first)
+scripts/install.sh client    # installs ~/.local/bin/rl-client
+```
+
+Or build a package: `cd packaging && makepkg -si`, then on the desktop
+`systemctl --user enable --now rl-host`.
+
+Desktop prerequisites:
+- **uinput access.** Check with `test -w /dev/uinput && echo ok`. If that
+  fails, install `packaging/70-remotelinux.rules` into `/etc/udev/rules.d/`.
+- **Firewall.** With ufw: `sudo ufw allow from 192.168.0.0/16 to any port 47800 proto udp`.
+
+## Pair (once)
+
+```sh
+# Desktop
+rl-host pair                 # shows a 6-digit PIN for 2 minutes
+
+# Laptop
+rl-client pair 192.168.0.196 # enter the PIN
+```
+
+## Connect
+
+```sh
+rl-client connect            # the only, or most recently used, desktop
+rl-client connect BhiziePC --res 720p --fullscreen --stats
+```
+
+Inside the viewer (the chord keys are never sent to the desktop):
+
+| Keys | Action |
+|---|---|
+| `Ctrl+Alt+Shift+Q` | Release / recapture keyboard and mouse (or click the window) |
+| `Ctrl+Alt+Shift+F` | Toggle fullscreen |
+| `Ctrl+Alt+Shift+S` | Toggle the stats overlay |
+| `Ctrl+Alt+Shift+R` | Relative mouse mode (pointer lock, for games) |
+| `Ctrl+Alt+Shift+D` | Disconnect |
+
+While the viewer has focus, every key goes to the desktop, including
+Super-key Hyprland shortcuts.
+
+## Other commands
+
+```sh
+rl-host status | list | unpair <name> | disconnect | monitors
+rl-client list [--probe] | probe [<host>] | forget <host>
+rl-client bench [<host>] --seconds 10    # headless latency measurement
+rl-client connect --view-only             # watch without sending input
+```
+
+Every command accepts `--json` for scripting and the GUI.
+
+## Configuration
+
+`~/.config/remotelinux/host.toml` (desktop):
+
+```toml
+listen = "0.0.0.0:47800"
+monitor = "auto"        # focused monitor, or e.g. "DP-1"
+resolution = "native"   # or "720p", "900p", "1080p"
+fps = 60
+bitrate_kbps = 15000
+encoder = "auto"        # auto | nvenc | x264
+show_cursor_in_stream = false
+notify_on_connect = true
+```
+
+`~/.config/remotelinux/client.toml` (laptop):
+
+```toml
+default_host = ""       # name from `rl-client list`
+fullscreen = false
+show_stats = false
+release_chord = "Ctrl+Alt+Shift+Q"
+resolution = ""         # empty = host default
+fps = 0
+bitrate_kbps = 0
+monitor = ""
+```
+
+Trust stores live in `~/.config/remotelinux/authorized_clients.toml` (desktop)
+and `known_hosts.toml` (laptop). Identities live in `~/.local/share/remotelinux/identity/`.
+
+## Integration (GUI / scripts)
+
+- **Library.** `rl_common::client::{pair, probe}`, `rl_common::trust::KnownHosts`
+  and `rl_common::config::ClientConfig` are plain public Rust APIs.
+- **Viewer events.** `rl-client connect <name> --json` writes one JSON object
+  per line to stdout. The `event` field is one of `connecting`, `connected`,
+  `stream`, `stats`, `input`, `disconnected`, `reconnecting`, `error`, `notice`,
+  `fullscreen`, `stats_visible`, `relative_mouse`, `closed`.
+- **Viewer commands.** When stdin is not a terminal, the viewer accepts JSON
+  lines: `{"cmd":"toggle_stats"|"fullscreen"|"release"|"resume"|"relative_mouse"|"disconnect"}`
+  or `{"cmd":"settings","resolution":"720p","fps":60,"bitrate_kbps":10000,"monitor":"DP-1"}`.
+  Settings are a partial update: only the keys present change, and `"native"`, `0` or `""`
+  reset a value to the host default. Closing stdin closes the viewer.
+- **Host control socket.** `$XDG_RUNTIME_DIR/remotelinux/host.sock` takes JSON
+  lines: `{"cmd":"status"|"list"|"pair"|"cancel_pair"|"unpair","name":...|"disconnect"}`.
+
+## Logs
+
+`RL_LOG=debug rl-host run`, or `journalctl --user -u rl-host -f`.
