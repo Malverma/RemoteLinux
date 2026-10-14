@@ -20,6 +20,8 @@ pub struct HostConfig {
     pub encoder: String,
     pub show_cursor_in_stream: bool,
     pub notify_on_connect: bool,
+    /// Forward desktop audio (the default output) to the client.
+    pub audio: bool,
     /// Device name presented to clients. Empty = hostname.
     pub name: String,
 }
@@ -35,6 +37,7 @@ impl Default for HostConfig {
             encoder: "auto".into(),
             show_cursor_in_stream: false,
             notify_on_connect: true,
+            audio: true,
             name: String::new(),
         }
     }

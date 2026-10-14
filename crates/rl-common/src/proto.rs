@@ -90,6 +90,28 @@ pub async fn read_msg<T: DeserializeOwned>(r: &mut quinn::RecvStream) -> Result<
 pub const DG_VIDEO: u8 = 0;
 pub const DG_MOTION_ABS: u8 = 1;
 pub const DG_MOTION_REL: u8 = 2;
+pub const DG_AUDIO: u8 = 3;
+
+/// Desktop audio: 48 kHz stereo Opus, one 10 ms frame per datagram.
+pub const AUDIO_RATE: u32 = 48_000;
+pub const AUDIO_CHANNELS: usize = 2;
+pub const AUDIO_FRAME: usize = 480;
+
+/// `tag u8 | seq u32 | opus packet`
+pub fn encode_audio(seq: u32, packet: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(5 + packet.len());
+    v.push(DG_AUDIO);
+    v.extend_from_slice(&seq.to_le_bytes());
+    v.extend_from_slice(packet);
+    v
+}
+
+pub fn decode_audio(d: &[u8]) -> Option<(u32, &[u8])> {
+    if d.len() < 5 || d[0] != DG_AUDIO {
+        return None;
+    }
+    Some((u32::from_le_bytes(d[1..5].try_into().ok()?), &d[5..]))
+}
 
 /// Pointer motion, sent as an unreliable datagram (latest wins).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -148,6 +170,13 @@ mod tests {
             assert_eq!(Motion::decode(&m.encode()), Some(m));
         }
         assert_eq!(Motion::decode(&[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn audio_roundtrip() {
+        let d = encode_audio(42, &[9, 8, 7]);
+        assert_eq!(decode_audio(&d), Some((42, &[9u8, 8, 7][..])));
+        assert_eq!(Motion::decode(&d), None);
     }
 
     #[test]

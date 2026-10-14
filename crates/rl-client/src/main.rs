@@ -1,3 +1,4 @@
+mod audio;
 mod decode;
 mod events;
 mod keymap;

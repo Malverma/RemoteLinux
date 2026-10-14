@@ -32,6 +32,8 @@ pub enum NetEvent {
     Connected { host_name: String, monitors: Vec<MonitorInfo> },
     Stream { monitor: String, width: u32, height: u32, fps: u32 },
     Frame { meta: FrameMeta, data: Vec<u8> },
+    /// One Opus packet of desktop audio.
+    Audio { seq: u32, data: Vec<u8> },
     /// Latest clock sync: RTT and host-minus-client clock offset.
     Clock { rtt_us: u64, offset_us: i64 },
     FramesDropped(u32),
@@ -248,7 +250,7 @@ async fn run_session(
         }
     };
 
-    // Video datagrams.
+    // Video and audio datagrams.
     let video = {
         let events = events.clone();
         let conn = conn.clone();
@@ -275,6 +277,10 @@ async fn run_session(
                         continue;
                     }
                 };
+                if let Some((seq, packet)) = rl_common::proto::decode_audio(&d) {
+                    events(NetEvent::Audio { seq, data: packet.to_vec() });
+                    continue;
+                }
                 last_fragment = Instant::now();
                 let p = ra.push(&d);
                 if p.dropped > 0 {

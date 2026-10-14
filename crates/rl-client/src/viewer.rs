@@ -12,7 +12,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
-use rl_common::proto::{ClientMsg, Motion, StreamSettings};
+use rl_common::proto::{ClientMsg, MonitorInfo, Motion, StreamSettings};
 use rl_common::trust::KnownHost;
 use rl_common::video::FrameMeta;
 use serde_json::json;
@@ -105,7 +105,7 @@ impl Shared {
     }
 }
 
-fn sdl_err() -> String {
+pub(crate) fn sdl_err() -> String {
     unsafe { CStr::from_ptr(SDL_GetError()).to_string_lossy().into_owned() }
 }
 
@@ -177,6 +177,30 @@ const SC_F: i32 = 9;
 const SC_S: i32 = 22;
 const SC_R: i32 = 21;
 const SC_D: i32 = 7;
+/// Scancodes 1..9 (monitor shortcuts).
+const SC_1: i32 = 30;
+const SC_9: i32 = 38;
+
+// Toolbar geometry, in toolbar units (one unit = one pixel of the 8 px debug font).
+const BAR_H: f32 = 18.0;
+const BTN_Y: f32 = 2.0;
+const BTN_H: f32 = 14.0;
+const BTN_PAD: f32 = 6.0;
+const BTN_GAP: f32 = 4.0;
+
+#[derive(Clone, PartialEq)]
+enum ToolAction {
+    Monitor(String),
+    Fullscreen,
+}
+
+struct Button {
+    x: f32,
+    w: f32,
+    label: String,
+    active: bool,
+    action: ToolAction,
+}
 
 struct Viewer {
     opts: Options,
@@ -194,6 +218,9 @@ struct Viewer {
     status_detail: String,
     notice: Option<(String, Instant)>,
     monitor: String,
+    /// Host monitors in reading order (top-left first): toolbar buttons 1, 2, …
+    monitors: Vec<MonitorInfo>,
+    hover: Option<ToolAction>,
     forwarding: bool,
     focused: bool,
     relative: bool,
@@ -222,6 +249,12 @@ pub fn run(opts: Options, commands: Option<mpsc::Receiver<Command>>) -> Result<(
             bail!("SDL_Init failed: {}", sdl_err());
         }
     }
+    let audio_tx = if !unsafe { SDL_InitSubSystem(SDL_INIT_AUDIO) } {
+        tracing::warn!("no audio: {}", sdl_err());
+        None
+    } else {
+        crate::audio::spawn().map_err(|e| tracing::warn!("no audio: {e:#}")).ok()
+    };
     let wake_type = unsafe { SDL_RegisterEvents(1) };
     if wake_type == 0 {
         bail!("SDL_RegisterEvents failed");
@@ -261,6 +294,11 @@ pub fn run(opts: Options, commands: Option<mpsc::Receiver<Command>>) -> Result<(
                 shared.bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
                 let _ = frame_tx.send((meta, data));
             }
+            NetEvent::Audio { seq, data } => {
+                if let Some(tx) = &audio_tx {
+                    let _ = tx.send((seq, data));
+                }
+            }
             other => shared.post(UiMsg::Net(other)),
         }
     };
@@ -298,6 +336,8 @@ pub fn run(opts: Options, commands: Option<mpsc::Receiver<Command>>) -> Result<(
         status_detail: String::new(),
         notice: None,
         monitor: String::new(),
+        monitors: Vec::new(),
+        hover: None,
         forwarding: true,
         focused: true,
         relative: false,
@@ -419,22 +459,47 @@ impl Viewer {
             SDL_EVENT_QUIT | SDL_EVENT_WINDOW_CLOSE_REQUESTED => self.quit = true,
             SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP => self.on_key(unsafe { ev.key }),
             SDL_EVENT_MOUSE_MOTION => {
+                unsafe { SDL_ConvertEventToRenderCoordinates(self.renderer, ev) };
+                let m = unsafe { ev.motion };
+                let captured = self.relative && self.active();
+                let hover = if captured { None } else { self.button_at(m.x, m.y) };
+                if hover != self.hover {
+                    self.hover = hover;
+                    self.render();
+                }
                 if !self.active() || self.tex.0 == 0 {
                     return;
                 }
-                unsafe { SDL_ConvertEventToRenderCoordinates(self.renderer, ev) };
-                let m = unsafe { ev.motion };
-                self.motion_seq = self.motion_seq.wrapping_add(1);
                 let motion = if self.relative {
-                    Motion::Rel { seq: self.motion_seq, dx: m.xrel, dy: m.yrel }
+                    // Output pixels → stream pixels.
+                    let k = self.tex.0 as f32 / self.video_rect().w;
+                    Motion::Rel { seq: self.motion_seq.wrapping_add(1), dx: m.xrel * k, dy: m.yrel * k }
+                } else if m.y < self.bar_px() {
+                    return; // over the toolbar
                 } else {
-                    Motion::Abs { seq: self.motion_seq, x: m.x / self.tex.0 as f32, y: m.y / self.tex.1 as f32 }
+                    let (x, y) = self.to_stream(m.x, m.y);
+                    Motion::Abs { seq: self.motion_seq.wrapping_add(1), x, y }
                 };
+                self.motion_seq = self.motion_seq.wrapping_add(1);
                 let _ = self.net.tx.send(Outgoing::Motion(motion));
             }
             SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => {
                 let b = unsafe { ev.button };
                 let down = SDL_EventType(t) == SDL_EVENT_MOUSE_BUTTON_DOWN;
+                if down && !(self.relative && self.active()) {
+                    unsafe { SDL_ConvertEventToRenderCoordinates(self.renderer, ev) };
+                    let p = unsafe { ev.button };
+                    if p.y < self.bar_px() {
+                        // Toolbar clicks stay local.
+                        self.swallowed_buttons.insert(b.button);
+                        if b.button == 1 {
+                            if let Some(a) = self.button_at(p.x, p.y) {
+                                self.on_tool(a);
+                            }
+                        }
+                        return;
+                    }
+                }
                 if down && !self.forwarding && self.connected {
                     // Click to resume; the click itself isn't forwarded.
                     self.swallowed_buttons.insert(b.button);
@@ -449,10 +514,11 @@ impl Viewer {
                 }
                 // Make sure the host pointer is where the click happens.
                 if down && !self.relative && self.tex.0 > 0 {
-                    unsafe { SDL_ConvertEventToRenderCoordinates(self.renderer, ev) };
+                    // Already converted to render coordinates above.
                     let b2 = unsafe { ev.button };
+                    let (x, y) = self.to_stream(b2.x, b2.y);
                     self.motion_seq = self.motion_seq.wrapping_add(1);
-                    let _ = self.net.tx.send(Outgoing::Motion(Motion::Abs { seq: self.motion_seq, x: b2.x / self.tex.0 as f32, y: b2.y / self.tex.1 as f32 }));
+                    let _ = self.net.tx.send(Outgoing::Motion(Motion::Abs { seq: self.motion_seq, x, y }));
                 }
                 if let Some(code) = keymap::mouse_button(b.button) {
                     self.send(ClientMsg::Button { code, pressed: down });
@@ -487,9 +553,20 @@ impl Viewer {
                 self.update_grab();
                 self.render();
             }
+            SDL_EVENT_WINDOW_MOUSE_LEAVE => {
+                if self.hover.take().is_some() {
+                    self.render();
+                }
+            }
             SDL_EVENT_WINDOW_RESIZED | SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED | SDL_EVENT_WINDOW_EXPOSED => self.render(),
-            SDL_EVENT_WINDOW_ENTER_FULLSCREEN => self.fullscreen = true,
-            SDL_EVENT_WINDOW_LEAVE_FULLSCREEN => self.fullscreen = false,
+            SDL_EVENT_WINDOW_ENTER_FULLSCREEN => {
+                self.fullscreen = true;
+                self.render();
+            }
+            SDL_EVENT_WINDOW_LEAVE_FULLSCREEN => {
+                self.fullscreen = false;
+                self.render();
+            }
             _ => {}
         }
     }
@@ -532,6 +609,13 @@ impl Viewer {
                     self.on_command(Command::Disconnect);
                     true
                 }
+                SC_1..=SC_9 => match self.monitors.get((sc - SC_1) as usize) {
+                    Some(m) => {
+                        self.on_tool(ToolAction::Monitor(m.name.clone()));
+                        true
+                    }
+                    None => false,
+                },
                 _ => false,
             };
             if handled {
@@ -616,6 +700,8 @@ impl Viewer {
             }
             NetEvent::Connected { host_name, monitors } => {
                 self.connected = true;
+                self.monitors = monitors.clone();
+                self.monitors.sort_by_key(|m| (m.y, m.x));
                 self.status.clear();
                 self.status_detail.clear();
                 self.update_grab();
@@ -662,7 +748,7 @@ impl Viewer {
                 tracing::error!("{msg}");
                 emit("error", json!({ "message": msg, "fatal": true }));
             }
-            NetEvent::Frame { .. } => {}
+            NetEvent::Frame { .. } | NetEvent::Audio { .. } => {}
         }
     }
 
@@ -749,6 +835,106 @@ impl Viewer {
         s.latency_n = 0;
     }
 
+    fn on_tool(&mut self, a: ToolAction) {
+        match a {
+            ToolAction::Fullscreen => self.on_command(Command::Fullscreen),
+            ToolAction::Monitor(name) => {
+                if name != self.monitor {
+                    self.notice = Some((format!("Switching to {name}…"), Instant::now()));
+                }
+                self.on_command(Command::Settings(SettingsPatch { monitor: Some(Some(name)), ..Default::default() }));
+            }
+        }
+    }
+
+    /// Toolbar units → output pixels.
+    fn ui_scale(&self) -> f32 {
+        let d = unsafe { SDL_GetWindowDisplayScale(self.window) };
+        (2.0 * if d > 0.0 { d } else { 1.0 }).round().clamp(1.0, 8.0)
+    }
+
+    fn bar_px(&self) -> f32 {
+        BAR_H * self.ui_scale()
+    }
+
+    fn output_size(&self) -> (f32, f32) {
+        let (mut w, mut h) = (0, 0);
+        unsafe { SDL_GetRenderOutputSize(self.renderer, &mut w, &mut h) };
+        (w as f32, h as f32)
+    }
+
+    /// Where the video is drawn: below the toolbar, letterboxed.
+    fn video_rect(&self) -> SDL_FRect {
+        let (ow, oh) = self.output_size();
+        let top = self.bar_px().min(oh);
+        let (aw, ah) = (ow, (oh - top).max(1.0));
+        if self.tex.0 == 0 {
+            return SDL_FRect { x: 0.0, y: top, w: aw, h: ah };
+        }
+        let s = (aw / self.tex.0 as f32).min(ah / self.tex.1 as f32);
+        let (w, h) = (self.tex.0 as f32 * s, self.tex.1 as f32 * s);
+        SDL_FRect { x: (aw - w) / 2.0, y: top + (ah - h) / 2.0, w, h }
+    }
+
+    /// Output pixels → normalised stream position (clamped to the picture).
+    fn to_stream(&self, x: f32, y: f32) -> (f32, f32) {
+        let r = self.video_rect();
+        (((x - r.x) / r.w).clamp(0.0, 1.0), ((y - r.y) / r.h).clamp(0.0, 1.0))
+    }
+
+    fn buttons(&self) -> Vec<Button> {
+        let (ow, _) = self.output_size();
+        let width = |l: &str| l.chars().count() as f32 * 8.0 + 2.0 * BTN_PAD;
+        let mut out = vec![];
+        let mut x = BTN_GAP;
+        if self.connected {
+            for (i, m) in self.monitors.iter().enumerate() {
+                let label = format!("{} {}", i + 1, m.name);
+                let w = width(&label);
+                out.push(Button { x, w, active: m.name == self.monitor, action: ToolAction::Monitor(m.name.clone()), label });
+                x += w + BTN_GAP;
+            }
+        }
+        let label = if self.fullscreen { "Exit fullscreen" } else { "Fullscreen" }.to_string();
+        let w = width(&label);
+        let fx = (ow / self.ui_scale() - w - BTN_GAP).max(x);
+        out.push(Button { x: fx, w, active: false, action: ToolAction::Fullscreen, label });
+        out
+    }
+
+    fn button_at(&self, x: f32, y: f32) -> Option<ToolAction> {
+        let s = self.ui_scale();
+        let (ux, uy) = (x / s, y / s);
+        if !(BTN_Y..BTN_Y + BTN_H).contains(&uy) {
+            return None;
+        }
+        self.buttons().into_iter().find(|b| (b.x..b.x + b.w).contains(&ux)).map(|b| b.action)
+    }
+
+    fn draw_toolbar(&self) {
+        let r = self.renderer;
+        let s = self.ui_scale();
+        let (ow, _) = self.output_size();
+        unsafe {
+            SDL_SetRenderScale(r, s, s);
+            SDL_SetRenderDrawColor(r, 0x17, 0x1A, 0x21, 255);
+            SDL_RenderFillRect(r, &SDL_FRect { x: 0.0, y: 0.0, w: ow / s, h: BAR_H });
+            for b in self.buttons() {
+                let hovered = self.hover.as_ref() == Some(&b.action);
+                let (cr, cg, cb) = match (b.active, hovered) {
+                    (true, _) => (0x4F, 0x8C, 0xFF),
+                    (false, true) => (0x2A, 0x2F, 0x3A),
+                    (false, false) => (0x1F, 0x23, 0x2C),
+                };
+                SDL_SetRenderDrawColor(r, cr, cg, cb, 255);
+                SDL_RenderFillRect(r, &SDL_FRect { x: b.x, y: BTN_Y, w: b.w, h: BTN_H });
+                SDL_SetRenderDrawColor(r, 0xE6, 0xE8, 0xEE, 255);
+                self.text(b.x + BTN_PAD, BTN_Y + (BTN_H - 8.0) / 2.0, &b.label);
+            }
+            SDL_SetRenderScale(r, 1.0, 1.0);
+        }
+    }
+
     fn text(&self, x: f32, y: f32, s: &str) {
         let c = CString::new(s.replace('\0', "")).unwrap_or_default();
         unsafe { SDL_RenderDebugText(self.renderer, x, y, c.as_ptr()) };
@@ -771,19 +957,19 @@ impl Viewer {
         let r = self.renderer;
         unsafe {
             SDL_SetRenderDrawColor(r, 0, 0, 0, 255);
-            SDL_SetRenderLogicalPresentation(r, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
             SDL_RenderClear(r);
             if !self.texture.is_null() {
-                SDL_SetRenderLogicalPresentation(r, self.tex.0 as i32, self.tex.1 as i32, SDL_LOGICAL_PRESENTATION_LETTERBOX);
-                SDL_RenderTexture(r, self.texture, ptr::null(), ptr::null());
-                SDL_SetRenderLogicalPresentation(r, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+                let dst = self.video_rect();
+                SDL_RenderTexture(r, self.texture, ptr::null(), &dst);
             }
+            self.draw_toolbar();
             // Overlays in window pixels, scaled for readability.
             let (mut ow, mut oh) = (0, 0);
             SDL_GetRenderOutputSize(r, &mut ow, &mut oh);
             let scale = ((oh as f32 / 540.0).floor()).clamp(1.0, 4.0);
             SDL_SetRenderScale(r, scale, scale);
             let (vw, vh) = (ow as f32 / scale, oh as f32 / scale);
+            let top = self.bar_px() / scale + 6.0;
 
             if !self.connected || self.texture.is_null() {
                 let mut lines = vec![if self.status.is_empty() { "Waiting for video…".to_string() } else { self.status.clone() }];
@@ -801,11 +987,11 @@ impl Viewer {
             if self.connected && !self.forwarding {
                 let l = format!("Input released - click to resume ({})", self.opts.release_chord);
                 let w = l.len() as f32 * 8.0 + 12.0;
-                self.panel(((vw - w) / 2.0).max(0.0), 6.0, &[l]);
+                self.panel(((vw - w) / 2.0).max(0.0), top, &[l]);
             } else if self.connected && !self.focused {
                 let l = "Window not focused - input paused".to_string();
                 let w = l.len() as f32 * 8.0 + 12.0;
-                self.panel(((vw - w) / 2.0).max(0.0), 6.0, &[l]);
+                self.panel(((vw - w) / 2.0).max(0.0), top, &[l]);
             }
             if let Some((n, _)) = &self.notice {
                 let w = n.len() as f32 * 8.0 + 12.0;
@@ -821,13 +1007,10 @@ impl Viewer {
                     format!("{:.0} fps   {:.1} Mbps   dropped {}", s.r_fps, s.r_kbps / 1000.0, s.r_dropped),
                     format!("{}  mouse {}", if self.active() { "input: on" } else { "input: off" }, if self.relative { "relative" } else { "absolute" }),
                 ];
-                self.panel(6.0, 6.0, &lines);
+                self.panel(6.0, top, &lines);
             }
+            // Back to 1:1 so mouse events convert to output pixels.
             SDL_SetRenderScale(r, 1.0, 1.0);
-            if !self.texture.is_null() {
-                // Keep mouse-coordinate conversion in stream pixels.
-                SDL_SetRenderLogicalPresentation(r, self.tex.0 as i32, self.tex.1 as i32, SDL_LOGICAL_PRESENTATION_LETTERBOX);
-            }
             SDL_RenderPresent(r);
         }
     }

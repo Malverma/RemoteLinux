@@ -45,6 +45,10 @@ rl-client connect            # the only, or most recently used, desktop
 rl-client connect BhiziePC --res 720p --fullscreen --stats
 ```
 
+The toolbar at the top of the viewer has one button per desktop monitor
+(numbered in reading order: top-left first) and a Fullscreen button. Toolbar
+clicks stay on the laptop. Desktop audio plays on the laptop's default output.
+
 Inside the viewer (the chord keys are never sent to the desktop):
 
 | Keys | Action |
@@ -54,6 +58,7 @@ Inside the viewer (the chord keys are never sent to the desktop):
 | `Ctrl+Alt+Shift+S` | Toggle the stats overlay |
 | `Ctrl+Alt+Shift+R` | Relative mouse mode (pointer lock, for games) |
 | `Ctrl+Alt+Shift+D` | Disconnect |
+| `Ctrl+Alt+Shift+1`…`9` | Stream monitor 1…9 (same numbering as the toolbar) |
 
 While the viewer has focus, every key goes to the desktop, including
 Super-key Hyprland shortcuts.
@@ -82,6 +87,7 @@ bitrate_kbps = 15000
 encoder = "auto"        # auto | nvenc | x264
 show_cursor_in_stream = false
 notify_on_connect = true
+audio = true            # forward desktop audio (needs parec: libpulse)
 ```
 
 `~/.config/remotelinux/client.toml` (laptop):

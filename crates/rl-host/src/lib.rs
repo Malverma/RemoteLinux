@@ -1,5 +1,6 @@
 //! RemoteLinux host: screen capture, encoding, streaming and input injection.
 
+pub mod audio;
 pub mod capture;
 pub mod control;
 pub mod encoder;

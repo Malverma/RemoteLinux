@@ -5,10 +5,11 @@ pkgrel=1
 pkgdesc="Low-latency LAN remote desktop for Hyprland (rl-host + rl-client)"
 arch=('x86_64')
 license=('Apache-2.0')
-depends=('ffmpeg' 'sdl3' 'hyprland')
+depends=('ffmpeg' 'sdl3' 'opus' 'hyprland')
 optdepends=('nvidia-utils: NVENC hardware encoding on the host'
             'polkit: one-click firewall / input setup from the app'
-            'libnotify: connect/disconnect notifications on the host')
+            'libnotify: connect/disconnect notifications on the host'
+            'libpulse: desktop audio forwarding (parec) on the host')
 makedepends=('cargo' 'clang')
 provides=('remotelinux')
 conflicts=('remotelinux')

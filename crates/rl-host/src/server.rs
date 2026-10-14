@@ -340,6 +340,7 @@ impl Host {
             anyhow::Ok(())
         };
 
+        let audio_bytes = bytes_sent.clone();
         let video = {
             let conn = conn.clone();
             let out_tx = out_tx.clone();
@@ -375,6 +376,39 @@ impl Host {
                     }
                 }
                 anyhow::Ok(())
+            }
+        };
+
+        // Desktop audio. Optional: a failure is reported, never fatal.
+        let audio = {
+            let conn = conn.clone();
+            let out_tx = out_tx.clone();
+            let enabled = self.config.audio;
+            let bytes_sent = audio_bytes;
+            async move {
+                if !enabled {
+                    return std::future::pending().await;
+                }
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                let (err_tx, mut err_rx) = mpsc::unbounded_channel();
+                crate::audio::spawn(tx, err_tx);
+                let mut seq: u32 = 0;
+                loop {
+                    tokio::select! {
+                        Some(p) = rx.recv() => {
+                            let d = rl_common::proto::encode_audio(seq, &p);
+                            seq = seq.wrapping_add(1);
+                            bytes_sent.fetch_add(d.len() as u64, Ordering::Relaxed);
+                            if let Err(e) = conn.send_datagram(Bytes::from(d)) {
+                                anyhow::bail!("sending audio: {e}");
+                            }
+                        }
+                        Some(e) = err_rx.recv() => {
+                            let _ = out_tx.send(HostMsg::Notice { text: format!("No audio: {e}") });
+                        }
+                        else => return std::future::pending().await,
+                    }
+                }
             }
         };
 
@@ -451,6 +485,7 @@ impl Host {
         let res = tokio::select! {
             r = writer => r,
             r = video => r,
+            r = audio => r,
             r = motion => r,
             r = control => r,
         };

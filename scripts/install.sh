@@ -33,11 +33,11 @@ if systemctl --user is-enabled -q rl-host.service 2>/dev/null; then
 fi
 
 missing=()
-for lib in libavcodec.so libSDL3.so; do
+for lib in libavcodec.so libSDL3.so libopus.so; do
   ldconfig -p | grep -q "$lib" || missing+=("$lib")
 done
 if ((${#missing[@]})); then
-  echo "! Missing runtime libraries (${missing[*]}). Install them with:  sudo pacman -S ffmpeg sdl3"
+  echo "! Missing runtime libraries (${missing[*]}). Install them with:  sudo pacman -S ffmpeg sdl3 opus"
 fi
 
 echo "Installed rl-host, rl-client and rl-gui to $bin."

@@ -24,6 +24,7 @@ struct Acc {
     connected: bool,
     fatal: Option<String>,
     size: (u32, u32),
+    audio_packets: u64,
 }
 
 fn pct(v: &mut [u64], p: f64) -> f64 {
@@ -53,6 +54,7 @@ pub fn run(host: KnownHost, settings: StreamSettings, name: String, dur: Duratio
                 }
             }
             NetEvent::FramesDropped(n) => a.dropped += n as u64,
+            NetEvent::Audio { .. } => a.audio_packets += 1,
             NetEvent::Fatal(e) => a.fatal = Some(e),
             NetEvent::Reconnecting { reason, .. } => eprintln!("reconnecting: {reason}"),
             _ => {}
@@ -109,6 +111,7 @@ pub fn run(host: KnownHost, settings: StreamSettings, name: String, dur: Duratio
         "fps": a.frames as f64 / secs,
         "mbps": a.bytes as f64 * 8.0 / 1e6 / secs,
         "dropped": a.dropped,
+        "audio_packets": a.audio_packets,
         "rtt_ms_p50": pct(&mut a.rtt_us, 0.5),
         "host_ms_p50": pct(&mut a.host_us, 0.5),
         "decode_ms_p50": pct(&mut a.decode_us, 0.5),
@@ -121,10 +124,12 @@ pub fn run(host: KnownHost, settings: StreamSettings, name: String, dur: Duratio
         println!(
             "{} frames ({:.1} fps, {}x{}), {:.1} Mbps, {} dropped\n\
              capture->decoded latency: p50 {:.1} ms, p95 {:.1} ms (excludes display)\n\
-             host capture+encode p50 {:.1} ms, decode p50 {:.1} ms, rtt p50 {:.2} ms",
+             host capture+encode p50 {:.1} ms, decode p50 {:.1} ms, rtt p50 {:.2} ms\n\
+             {} audio packets",
             v["frames"], v["fps"].as_f64().unwrap_or(0.0), a.size.0, a.size.1, v["mbps"].as_f64().unwrap_or(0.0), a.dropped,
             v["latency_ms_p50"].as_f64().unwrap_or(f64::NAN), v["latency_ms_p95"].as_f64().unwrap_or(f64::NAN),
             v["host_ms_p50"].as_f64().unwrap_or(f64::NAN), v["decode_ms_p50"].as_f64().unwrap_or(f64::NAN), v["rtt_ms_p50"].as_f64().unwrap_or(f64::NAN),
+            a.audio_packets,
         );
         if a.frames == 0 {
             println!("(no frames: the desktop screen may be static — move something on it)");
